@@ -41,16 +41,13 @@
     small callback class.
 
 */
-namespace Network
-{
-    /** The default timeout in millisecond */
-    enum { DefaultTimeOut = ::Time::DefaultTimeOut };
-    /** The string class we are using */
-    typedef Strings::FastString String;
-
-    /** Classes used to manipulate network addresses */
-    namespace Address
+namespace Network::Address
     {
+        /** The default timeout in millisecond */
+        enum { DefaultTimeOut = ::Time::DefaultTimeOut };
+        /** The string class we are using */
+        typedef Strings::FastString String;
+
         /** The base interface for a network device address */
         struct BaseAddress
         {
@@ -797,6 +794,5 @@ namespace Network
             ~AddressPair() { Clear(); }
         };
     }
-}
 
 #endif

@@ -18,7 +18,56 @@
 // We need SSL socket declaration too
 //#include "../../../include/Network/SSLSocket.hpp"
 // We need FastLock too
+#if defined(ARDUINO_NANO_RP2040_CONNECT)
+// We need FreeRTOS stuff
+#include "FreeRTOS.h"
+#include "semphr.h"
+
+/** Convert millisecond to FreeRTOS' ticks */
+static unsigned fromMs(const unsigned waitMillisecond)
+{
+    return waitMillisecond == (unsigned)-1 ? portMAX_DELAY : (waitMillisecond / portTICK_PERIOD_MS);
+}
+
+/** A very simple, but complete non-recursive mutex class */
+class Mutex
+{
+private:
+    StaticSemaphore_t buffer{};
+    SemaphoreHandle_t sem;
+
+public:
+    /** Construct a mutex */
+    Mutex() : sem(xSemaphoreCreateMutexStatic(&buffer)) {}
+
+    /** Acquire a mutex and wait for the given timeout.
+        @param waitMillisecond  The time to wait in milliseconds
+        @return true if the mutex was held */
+    bool acquire(unsigned waitMillisecond = (unsigned)-1)
+    {
+        return xSemaphoreTake(sem, fromMs(waitMillisecond)) == pdTRUE;
+    }
+    /** Release a mutex.
+        @return true upon successful releasing */
+    bool release() { return xSemaphoreGive(sem) == pdTRUE; }
+};
+
+/** A scoped lock.
+    A RAII class for mutex locking on construction and unlocking upon destruction. */
+struct ScopedLock
+{
+    Mutex & mutex;
+    /** Hold a mutex upon construction */
+    explicit ScopedLock(Mutex & mutex) : mutex(mutex) { mutex.acquire(); }
+    ~ScopedLock() { mutex.release(); }
+};
+
+#define MQTTLock        Mutex
+#define MQTTScopedLock  ScopedLock
+#else
 #include "Threading/Lock.hpp"
+#endif
+
 #else
 // We need BSD socket here
 #include <sys/socket.h>
@@ -52,13 +101,18 @@
 #define StackSizeAllocationLimit    512
 
 
-namespace Network { namespace Client {
+namespace Network::Client {
 
 #if MQTTOnlyBSDSocket != 1
+#ifndef ARDUINO_NANO_RP2040_CONNECT
     /*  The socket class we are using for socket operations.
         There's a default implementation for Berkeley socket and (Open)SSL socket in the ClassPath, but
         you can implement any library you want, like, for example, lwIP, so change this if you do */
     typedef Network::Socket::BerkeleySocket Socket;
+#else
+//    here goes ESPHostSocket
+    typedef Network::Socket::ESPHostSocket Socket;
+#endif
   #if MQTTUseTLS == 1
     /*  The SSL socket we are using (when using SSL/TLS connection).
         There's a default implementation for (Open/Libre)SSL socket in ClassPath, but you can implement
@@ -69,12 +123,12 @@ namespace Network { namespace Client {
   #endif
 
     /** The scoped lock class we are using */
-    typedef Threading::ScopedLock   ScopedLock;
+    typedef ScopedLock   ScopedLock;
 
     struct MQTTv5::Impl
     {
         /** The multithread protection for this object */
-        Threading::Lock                 lock;
+        Mutex                 lock;
         /** This client socket */
         Socket *                        socket;
         /** The DER encoded certificate (if provided) */
@@ -130,7 +184,7 @@ namespace Network { namespace Client {
         }
 
         Impl(const char * clientID, MessageReceived * callback, const DynamicBinDataView * brokerCert)
-             : socket(0), brokerCert(brokerCert),
+             : socket(nullptr), brokerCert(brokerCert),
   #if MQTTUseTLS == 1
                sslContext(0),
   #endif
@@ -140,14 +194,14 @@ namespace Network { namespace Client {
                clientID(clientID), cb(callback), timeoutMs(3000), lastCommunication(0), publishCurrentId(0), keepAlive(300),
                recvState(Ready), recvBufferSize(max(callback->maxPacketSize(), 8U)), maxPacketSize(65535), available(0), recvBuffer((uint8*)::malloc(recvBufferSize)), packetExpectedVBSize(Protocol::MQTT::Common::VBInt(recvBufferSize).getSize())
         {}
-        ~Impl() { delete socket; socket = 0; ::free(recvBuffer); recvBuffer = 0; recvBufferSize = 0; }
+        ~Impl() { delete socket; socket = nullptr; ::free(recvBuffer); recvBuffer = nullptr; recvBufferSize = 0; }
 
 
         inline void setTimeout(uint32 timeout) { timeoutMs = timeout; }
 
-        bool shouldPing()
+        [[nodiscard]] bool shouldPing() const
         {
-            return (((uint32)time(NULL) - lastCommunication) >= keepAlive);
+            return (((uint32)time(nullptr) - lastCommunication) >= keepAlive);
         }
 
         int send(const char * buffer, const uint32 length)
@@ -164,7 +218,7 @@ namespace Network { namespace Client {
             return socket->sendReliably(buffer, (int)length, timeoutMs);
         }
 
-        bool hasValidLength() const
+        [[nodiscard]] bool hasValidLength() const
         {
             Protocol::MQTT::Common::VBInt l;
             return l.readFrom(recvBuffer + 1, available - 1) != Protocol::MQTT::Common::BadData;
@@ -263,7 +317,7 @@ namespace Network { namespace Client {
                 header.raw = recvBuffer[0];
                 Logger::log(Logger::Dump, "< Received packet: %s(R:%d,Q:%d,D:%d)%s", Protocol::MQTT::V5::Helper::getControlPacketName((Protocol::MQTT::Common::ControlPacketType)(uint8)header.type), header.retain, header.QoS, header.dup, (const char*)packetDump);
 #endif
-                lastCommunication = (uint32)time(NULL);
+                lastCommunication = (uint32)time(nullptr);
                 return (int)available;
             }
             // No yet, but we probably timed-out.
@@ -271,10 +325,10 @@ namespace Network { namespace Client {
         }
 
         /** Get the last received packet type */
-        Protocol::MQTT::V5::ControlPacketType getLastPacketType() const
+        [[nodiscard]] Protocol::MQTT::V5::ControlPacketType getLastPacketType() const
         {
             if (recvState != GotCompletePacket) return Protocol::MQTT::V5::RESERVED;
-            Protocol::MQTT::V5::FixedHeader header;
+            Protocol::MQTT::V5::FixedHeader header{};
             header.raw = recvBuffer[0];
             return (Protocol::MQTT::V5::ControlPacketType)(uint8)header.type;
         }
@@ -287,8 +341,7 @@ namespace Network { namespace Client {
                 int ret = receiveControlPacket();
                 if (ret <= 0) return ret;
 
-                if (recvState != GotCompletePacket)
-                    return -2;
+                return -2;
             }
 
             // Check the packet is the last expected type
@@ -317,7 +370,7 @@ namespace Network { namespace Client {
             delete0(socket);
         }
 
-        bool isOpen()
+        [[nodiscard]] bool isOpen() const
         {
             return socket != nullptr;
         }
@@ -353,8 +406,10 @@ namespace Network { namespace Client {
             if (!socket->setOption(Network::Socket::BaseSocket::Blocking, 0)) return -3;
             if (!socket->setOption(Network::Socket::BaseSocket::NoDelay, 1)) return -4;
             if (!socket->setOption(Network::Socket::BaseSocket::NoSigPipe, 1)) return -5;
+            String url("");
+            Network::Address::URL broker(host);
             // Then connect the socket to the server
-            int ret = socket->connect(Network::Address::URL("", String(host) + ":" + port, ""));
+            int ret = socket->connect(broker.getBindableAddress());
             if (ret < 0) return -6;
             if (ret == 0) return 0;
 
@@ -472,42 +527,54 @@ namespace Network { namespace Client {
         }
 
     };
+
 #else
 #ifndef MQTTLock
-    /* If you have a true lock object in your system (for example, in FreeRTOS, use a mutex),
-       you should provide one instead of this one as this one just burns CPU while waiting */
-    class SpinLock
-    {
-        mutable std::atomic<bool> state;
-    public:
-        /** Construction */
-        SpinLock() : state(false) {}
-        /** Acquire the lock */
-        inline void acquire() volatile
-        {
-            while (state.exchange(true, std::memory_order_acq_rel))
-            {
-                // Put a sleep method here (using select here since it's cross platform in BSD socket API)
-                struct timeval tv;
-                tv.tv_sec = 0; tv.tv_usec = 500; // Wait 0.5ms per loop
-                select(0, NULL, NULL, NULL, &tv);
-            }
-        }
-        /** Try to acquire the lock */
-        inline bool tryAcquire() volatile { return state.exchange(true, std::memory_order_acq_rel) == false; }
-        /** Check if the lock is taken. For debugging purpose only */
-        inline bool isLocked() const volatile { return state.load(std::memory_order_consume); }
-        /** Release the lock */
-        inline void release() volatile { state.store(false, std::memory_order_release);; }
-    };
+// We need FreeRTOS stuff
+#include "FreeRTOS.h"
+#include "semphr.h"
 
-    typedef SpinLock Lock;
-    struct ScopedLock
-    {
-        Lock & a;
-        ScopedLock(Lock & a) : a(a) { a.acquire(); }
-        ~ScopedLock() { a.release(); }
-    };
+/** Convert millisecond to FreeRTOS' ticks */
+        static unsigned fromMs(const unsigned waitMillisecond)
+        {
+            return waitMillisecond == (unsigned)-1 ? portMAX_DELAY : (waitMillisecond / portTICK_PERIOD_MS);
+        }
+
+/** A very simple, but complete non-recursive mutex class */
+        class Mutex
+        {
+        private:
+            StaticSemaphore_t buffer{};
+            SemaphoreHandle_t sem;
+
+        public:
+            /** Construct a mutex */
+            Mutex() : sem(xSemaphoreCreateMutexStatic(&buffer)) {}
+
+            /** Acquire a mutex and wait for the given timeout.
+                @param waitMillisecond  The time to wait in milliseconds
+                @return true if the mutex was held */
+            bool acquire(unsigned waitMillisecond = (unsigned)-1)
+            {
+                return xSemaphoreTake(sem, fromMs(waitMillisecond)) == pdTRUE;
+            }
+            /** Release a mutex.
+                @return true upon successful releasing */
+            bool release() { return xSemaphoreGive(sem) == pdTRUE; }
+        };
+
+/** A scoped lock.
+    A RAII class for mutex locking on construction and unlocking upon destruction. */
+        struct ScopedLock
+        {
+            Mutex & mutex;
+            /** Hold a mutex upon construction */
+            explicit ScopedLock(Mutex & mutex) : mutex(mutex) { mutex.acquire(); }
+            ~ScopedLock() { mutex.release(); }
+        };
+
+#define MQTTLock        Mutex
+#define MQTTScopedLock  ScopedLock \
 #else
     #define Lock        MQTTLock
     #define ScopedLock  MQTTScopedLock
@@ -1663,4 +1730,4 @@ namespace Network { namespace Client {
         impl->setTimeout(timeoutMs);
     }
 
-}}
+}

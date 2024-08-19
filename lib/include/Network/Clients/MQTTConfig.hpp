@@ -59,7 +59,7 @@
 
     Default: 0 */
 #ifndef MQTTOnlyBSDSocket
-  #define MQTTOnlyBSDSocket   1
+  #define MQTTOnlyBSDSocket   9
 #endif
 
 /** Low latency mode

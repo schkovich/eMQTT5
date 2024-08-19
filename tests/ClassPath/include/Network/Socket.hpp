@@ -2,13 +2,13 @@
 #define hpp_CPP_Socket_CPP_hpp
 
 // We need address declarations
+#include "Types.hpp"
 #include "Address.hpp"
-
+#include "WiFiClient.h"
 /** Network specific code, like socket classes declaration and others */
-namespace Network
-{
+
     /** The socket namespace contains the socket definitions */
-    namespace Socket
+    namespace Network::Socket
     {
         /** Shortcut to the base address interface */
         typedef Address::BaseAddress Address;
@@ -133,7 +133,7 @@ namespace Network
                 @param bufferSize  The buffer's size in bytes
                 @param timeout     The time to wait before timing out, in milliseconds.
                 @return -1 on error, if this method returns less than the asked size, the connection was closed or the timeout expired. */
-            virtual int receiveReliably(char * buffer, const int bufferSize, const Time::TimeOut & timeout = DefaultTimeOut) const;
+            virtual int receiveReliably(char * buffer, const int bufferSize, const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const;
             /** Receive data on the datagram socket.
                 This might not be supported on every socket class.
                 @param buffer       The buffer to store data from
@@ -154,7 +154,7 @@ namespace Network
                 @param splitSize   If not 0, this split the buffer by sending it in block of that size.
                 @param timeout     The time to wait before timing out, in milliseconds.
                 @return -1 on error, if this method returns less than the asked size, the connection was closed or the timeout expired. */
-            virtual int sendReliably(const char * buffer, const int bufferSize, const unsigned int splitSize = 0, const Time::TimeOut & timeout = DefaultTimeOut) const;
+            virtual int sendReliably(const char * buffer, const int bufferSize, const unsigned int splitSize = 0, const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const;
             /** This method is used to shorcut the split size parameter and avoid a timeout to splitSize implicit conversion when used improperly */
             inline int sendReliably(const char * buffer, const int bufferSize, const Time::TimeOut & timeout) const { return sendReliably(buffer, bufferSize, 0, timeout); }
             /** Send data and file asynchronously on the socket.
@@ -235,7 +235,7 @@ namespace Network
                 @param writing When true, the select return true as soon as the socket is ready to be written to
                 @param timeout The timeout in millisecond to wait for before returning (negative for infinite time)
                 @return true if the socket match the queried requirement, false otherwise */
-            virtual bool select(const bool reading, const bool writing, const Time::TimeOut & timeout = DefaultTimeOut) const = 0;
+            virtual bool select(const bool reading, const bool writing, const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const = 0;
             /** Append this socket to a monitoring pool (so it's possible to select over multiple socket later on)
                 @param pool     If set, this socket is appended to this pool. You can use a null pointer to create a new pool.
                 @return A MonitoringPool object that can later be used to select over multiple socket (or 0 on error). You must delete this object */
@@ -284,6 +284,162 @@ namespace Network
             /** The Local class is allowed to open and close socket by its own */
             friend class Local;
         };
+
+        /** ESPHost socket use ESPHost's implementation
+            Typically, the one present in Linux and other Posix system */
+        struct ESPHostSocket : public BaseSocket
+        {
+            // Type definition and enumeration
+        public:
+            /** The usual error codes */
+            enum ErrorFunc { SocketError = -1 };
+            /** The socket type to use internally */
+            typedef int         sock_t;
+
+            // Members
+        protected:
+            /** The actual socket descriptor */
+            sock_t      descriptor;
+            /** The socket type */
+            Type        type;
+            /** The socket state */
+            State       state;
+            /** The private field */
+            void *      priv;
+
+            // BaseSocket Interface
+        protected:
+            /** Open a socket of the specified type */
+            virtual bool open(const Type type);
+            /** Close the socket */
+            virtual bool close();
+
+        public:
+            /** Bind a socket on the given address */
+            virtual Error bind(const Address & address, const bool allowBroadcast = false);
+            /** Bind on a multicast group.
+                This is used to join a multicast group identified by a multicast IP address.
+                @param multicastAddress The group address to join (if any port specified, it's used locally)
+                @param interfaceAddress If specified and valid, bind on the given interface. It's not owned.
+                @return The translated error for the operation */
+            virtual Error bindOnMulticast(const Address & multicastAddress, const Address * interfaceAddress = 0);
+            /** Bind on a multicast interface.
+                Unlike the bindOnMulticast method, this only set the socket to multicast on a specific interface.
+                It does not join a group.
+                @param interfaceAddress     The interface address
+                @return true on success */
+            virtual bool bindMulticastInterface(const Address & interfaceAddress);
+            /** Connect a socket to the given address */
+            Error connect(const Address & address) override;
+            /** Accept a connection (and fill the address on success) */
+            virtual BaseSocket * accept(Address *& address);
+            /** Listen on such socket */
+            virtual Error listen(const int maxAllowedConnection = 5);
+            /** Receive data on the socket */
+            virtual int receive(char * buffer, const int bufferSize, const int flags) const;
+            /** Receive data on the datagram socket.
+                This might not be supported on every socket class.
+                @warning You must delete the returned address */
+            virtual int receiveFrom(char * buffer, const int bufferSize, Address *& from) const;
+            /** Send data on the datagram socket.
+                This might not be supported on every socket class. */
+            virtual int sendTo(const char * buffer, const int bufferSize, const Address & to) const;
+            /** Send data on the socket */
+            virtual int send(const char * buffer, const int bufferSize, const int flags) const;
+            /** Send data and file asynchronously on the socket.
+                Not all sockets support this feature, and is emulated with a thread if not supported.
+                @param  prefixBuffer    If set, these data are sent before the file is sent.
+                @param  prefixLength    The prefix buffer length
+                @param  filePath        The file path to send
+                @param  offset          The file offset to start with
+                @param  size            The file's size to send (can be 0 to send whole file)
+                @param  suffixBuffer    If set, these data are sent after the file is sent.
+                @param  suffixLength    The suffix buffer length
+                @param  callback        When all the data are sent or an error occurred, this callback is called. It must still exist until transfer completed.
+                @return true if the operation can start, false otherwise (max number of AIO file reached, or unsupported method) */
+            virtual bool sendDataAndFile(const char * prefixBuffer, const int prefixLength, const String & filePath, const uint64 offset, const uint64 size,
+                                         const char * suffixBuffer, const int suffixLength, SDAFCallback & callback);
+            /** Cancel an asynchronous sending */
+            virtual bool cancelAsyncSend();
+            /** Send data from multiple buffer at once.
+                This can be implemented efficiently in some OS, so the best method is used whenever applicable.
+                The default implementation iterate over the given buffers
+                @param  buffers         An array of pointers to the buffers to send
+                @param  buffersSize     An array of buffer sizes in bytes
+                @param  buffersCount    The number of buffers to send
+                @param  flags           Any sending flags
+                @return -1 on error, the number of bytes sent */
+            virtual int sendBuffers(const char ** buffers, const int * buffersSize, const int buffersCount, const int flags = 0) const;
+            /** Send data from multiple buffer at once to the specified address (this only works for datagram sockets).
+                This can be implemented efficiently in some OS, so the best method is used whenever applicable.
+                The default implementation iterate over the given buffers (this works for TCP not for UDP
+                since multiple datagram will be sent)
+                @param  buffers         An array of pointers to the buffers to send
+                @param  buffersSize     An array of buffer sizes in bytes
+                @param  buffersCount    The number of buffers to send
+                @param  to              The address to send to
+                @return -1 on error, the number of bytes sent */
+            virtual int sendBuffersTo(const char ** buffers, const int * buffersSize, const int buffersCount, const Address & to) const;
+            /** Set the socket option */
+            virtual bool setOption(const Option option, const int value);
+            /** Get the socket option */
+            virtual bool getOption(const Option option, int & value);
+            /** Select on this socket.
+                @param reading When true, the select return true as soon as the socket has read data available
+                @param writing When true, the select return true as soon as the socket is ready to be written to
+                @param timeout The timeout in millisecond to wait for before returning (negative for infinite time)
+                @return true if the socket match the queried requirement, false otherwise */
+            virtual bool select(const bool reading, const bool writing, const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const;
+            /** Append this socket to a monitoring pool (so it's possible to select over multiple socket later on)
+                @param pool     If set, this socket is appended to this pool. You can use a null pointer to create a new pool.
+                @return A MonitoringPool object that can later be used to select over multiple socket (or 0 on error). You must delete this object */
+            virtual MonitoringPool * appendToMonitoringPool(MonitoringPool * pool);
+            /** Get the socket type  */
+            virtual Type getType() const { return type; }
+            /** Get the socket class instantiation number */
+            virtual int getTypeID() const { return 1; }
+            /** Get the socket state  */
+            virtual State getState() const { return state; }
+            /** Get the peer name for a connected socket
+                @return a pointer to an Address you must delete on success, or 0 on error */
+            virtual Address * getPeerName() const;
+            /** Get the bound address for a connected socket
+                @return a pointer to an Address you must delete on success, or 0 on error */
+            virtual Address * getBoundAddress() const;
+            /** Get the private field.
+                This is used to store an unknown data per socket.
+                @return a reference to a pointer you can set to whatever struct you want.
+                @warning you must manage this field allocation and destruction. */
+            virtual void * & getPrivateField() { return priv; }
+
+
+            // Our interface
+        public:
+            /** Let the ESPHost monitoring pool access our internal stuff */
+            friend class BerkeleyPool;
+            friend struct WaitingThread;
+
+            /** Open a socket of the specified type (internal) */
+            virtual bool open(const bool ipv6);
+
+            // Helpers
+        protected:
+            /** This constructor is used internally to build the object from the underlying stuff */
+            ESPHostSocket(const sock_t desc, const Type type, const State state = Connecting) : descriptor(desc), type(type), state(state == Unset ? (desc == 0 ? Unset : Opened) : state), priv(0) {}
+            /** Set the state and return success */
+            Error setState(const State newState);
+
+            // Construction and destruction
+        public:
+            /** Construction */
+            ESPHostSocket() : descriptor((sock_t)SocketError), type(Unknown), state(Unset), priv(0) {}
+            /** Construct a socket of the given type */
+            ESPHostSocket(const Type type) : descriptor((sock_t)SocketError), type(type), state(Unset), priv(0) {}
+
+            /** Our destructor */
+            ~ESPHostSocket() { close(); }
+        };
+
 
         /** Berkeley socket use Berkeley's implementation
             Typically, the one present in Linux and other Posix system */
@@ -341,7 +497,7 @@ namespace Network
                 @return true on success */
             virtual bool bindMulticastInterface(const Address & interfaceAddress);
             /** Connect a socket to the given address */
-            virtual Error connect(const Address & address);
+            Error connect(const Address & address) override;
             /** Accept a connection (and fill the address on success) */
             virtual BaseSocket * accept(Address *& address);
             /** Listen on such socket */
@@ -400,7 +556,7 @@ namespace Network
                 @param writing When true, the select return true as soon as the socket is ready to be written to
                 @param timeout The timeout in millisecond to wait for before returning (negative for infinite time)
                 @return true if the socket match the queried requirement, false otherwise */
-            virtual bool select(const bool reading, const bool writing, const Time::TimeOut & timeout = DefaultTimeOut) const;
+            virtual bool select(const bool reading, const bool writing, const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const;
             /** Append this socket to a monitoring pool (so it's possible to select over multiple socket later on)
                 @param pool     If set, this socket is appended to this pool. You can use a null pointer to create a new pool.
                 @return A MonitoringPool object that can later be used to select over multiple socket (or 0 on error). You must delete this object */
@@ -506,18 +662,18 @@ namespace Network
                 @param writing When true, the select return true as soon as the socket is ready to be written to
                 @param timeout The timeout in millisecond to wait for before returning (negative for infinite time)
                 @return false on timeout or error, or true if at least one socket in the pool is ready */
-            virtual bool select(const bool reading, const bool writing, const Time::TimeOut & timeout = DefaultTimeOut) const = 0;
+            virtual bool select(const bool reading, const bool writing, const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const = 0;
 
             /** Check if at least a socket in the pool is ready for reading
                 @param timeout  The timeout to wait for in millisecond */
-            virtual bool isReadPossible(const Time::TimeOut & timeout = DefaultTimeOut) const = 0;
+            virtual bool isReadPossible(const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const = 0;
             /** Check if at least a socket in the pool is ready for writing
                 @param timeout  The timeout to wait for in millisecond */
-            virtual bool isWritePossible(const Time::TimeOut & timeout = DefaultTimeOut) const = 0;
+            virtual bool isWritePossible(const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const = 0;
             /** Check if a socket is connected.
                 @warning this put the sockets in non blocking mode, and put them back in blocking mode automatically after this call
                 @param timeout  The timeout to wait for in millisecond */
-            virtual bool isConnected(const Time::TimeOut & timeout = DefaultTimeOut) = 0;
+            virtual bool isConnected(const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) = 0;
 
             /** Check which socket was ready in the given pool
                 @param index    Start by this index when searching (start by -1)
@@ -552,7 +708,7 @@ namespace Network
                 @param other    The other pool to select for writing
                 @param timeout  The timeout in millisecond to wait for before returning (negative for infinite time)
                 @return 0 if no socket are ready or timed-out, 1 if the our pool got socket(s) ready, 2 if the other pool got socket(s) ready (or 3 if both are ready) */
-            virtual int selectMultiple(MonitoringPool * other, const Time::TimeOut & timeout = DefaultTimeOut) const = 0;
+            virtual int selectMultiple(MonitoringPool * other, const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const = 0;
 
             /** Required virtual destructor */
             virtual ~MonitoringPool() {}
@@ -602,15 +758,15 @@ namespace Network
                 @param writing When true, the select return true as soon as the socket is ready to be written to
                 @param timeout The timeout in millisecond to wait for before returning (negative for infinite time)
                 @return false on timeout or error, or true if at least one socket in the pool is ready */
-            virtual bool select(const bool reading, const bool writing, const Time::TimeOut & timeout = DefaultTimeOut) const;
+            virtual bool select(const bool reading, const bool writing, const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const;
 
             /** Check if at least a socket in the pool is ready for reading */
-            virtual bool isReadPossible(const Time::TimeOut & timeout = DefaultTimeOut) const;
+            virtual bool isReadPossible(const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const;
             /** Check if at least a socket in the pool is ready for writing */
-            virtual bool isWritePossible(const Time::TimeOut & timeout = DefaultTimeOut) const;
+            virtual bool isWritePossible(const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const;
             /** Check if a socket is connected.
                 @warning this put the sockets in non blocking mode, and put them back in blocking mode automatically after this call */
-            virtual bool isConnected(const Time::TimeOut & timeout = DefaultTimeOut);
+            virtual bool isConnected(const Time::TimeOut & timeout = Network::Address::DefaultTimeOut);
 
             /** Check which socket was ready in the given pool
                 @param index    Start by this index when searching (start by -1)
@@ -639,7 +795,7 @@ namespace Network
                 @param other    The other pool to select for writing
                 @param timeout  The timeout in millisecond to wait for before returning (negative for infinite time)
                 @return 0 if no socket are ready or timed-out, 1 if the our pool got socket(s) ready, 2 if the other pool got socket(s) ready */
-            virtual int selectMultiple(MonitoringPool * other, const Time::TimeOut & timeout = DefaultTimeOut) const;
+            virtual int selectMultiple(MonitoringPool * other, const Time::TimeOut & timeout = Network::Address::DefaultTimeOut) const;
 
             // Construction and destruction
         public:
@@ -751,6 +907,6 @@ namespace Network
 #endif
 
     }
-}
+
 
 #endif

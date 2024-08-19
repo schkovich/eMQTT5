@@ -266,12 +266,49 @@
 
 #else
     // Prevent the types.h file to define the fd_set type (stupid definition by the way)
-    #define __USE_W32_SOCKETS
+//    #define __USE_W32_SOCKETS
     #include <stdio.h>
     #include <time.h>
     #include <stdlib.h>
     #include <string.h>
     #include <wchar.h>
+    #include "sys/select.h"
+    #include "sys/time.h"
+    #include "sys/_timeval.h"
+
+/**
+ * The 8-bit unsigned data type.
+ *
+ * This may have to be tweaked for your particular compiler. "unsigned
+ * char" works for most compilers.
+ */
+typedef uint8_t u8_t;
+typedef uint16_t in_port_t;
+typedef uint32_t in_addr_t;
+typedef unsigned short sa_family_t;
+struct in_addr {
+           in_addr_t s_addr;
+       };
+struct in6_addr {
+    uint8_t s6_addr[16];        
+};
+
+struct sockaddr_in {
+    u8_t            sin_len;
+    sa_family_t     sin_family;
+    in_port_t       sin_port;
+    struct in_addr  sin_addr;
+};
+
+struct sockaddr_in6 {
+    sa_family_t     sin6_family;    
+    in_port_t       sin6_port;      
+    uint32_t        sin6_flowinfo;  
+    struct in6_addr sin6_addr;      
+    uint32_t        sin6_scope_id;  
+};
+
+#ifndef ARDUINO_NANO_RP2040_CONNECT
     #include "pthreadRTOS.h"
     #include "lwip/sockets.h"
 
@@ -286,6 +323,7 @@
     #include "bsp/inc/hw_types.h"
     #include "driverlib/rom_map.h"
     #include "driverlib/interrupt.h"
+#endif
 
 
     #ifndef DontWantUINT8
